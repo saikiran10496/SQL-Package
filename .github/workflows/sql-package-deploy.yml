@@ -1,0 +1,210 @@
+name: SQL-PACKAGE
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - satish/sqlworkflowsetup
+
+jobs:
+  copy-changed-files:
+    runs-on: self-hosted
+    outputs:
+      changes_found: ${{ steps.copy-files.outputs.changes_found }}
+     
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Copy Changed Files from SQL migrations
+        id: copy-files
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_ID: ${{ github.sha }}
+        run: |
+          # Your existing script for identifying and copying changed files
+          # ...
+          
+      - name: Upload Changed Files Artifact
+        if: steps.copy-files.outputs.changes_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ${{ github.workspace }}/changed-files/
+          if-no-files-found: warn
+          retention-days: 30
+
+  deploy-to-dev:
+    needs: copy-changed-files
+    if: needs.copy-changed-files.outputs.changes_found == 'true'
+    runs-on: self-hosted
+    environment: development
+    
+    steps:
+      - name: Download SQL Migration Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ./sql-scripts
+
+      # Split SQL files into database creation and table creation scripts
+      - name: Prepare SQL Scripts
+        shell: pwsh
+        run: |
+          # Create directories for database and table scripts
+          New-Item -Path "./db-scripts" -ItemType Directory -Force
+          New-Item -Path "./table-scripts" -ItemType Directory -Force
+          
+          # Find all SQL files
+          $sqlFiles = Get-ChildItem -Path "./sql-scripts" -Filter "*.sql" -Recurse
+          
+          foreach ($file in $sqlFiles) {
+            $content = Get-Content -Path $file.FullName -Raw
+            
+            # If file contains CREATE DATABASE, copy to db-scripts
+            if ($content -match "CREATE DATABASE") {
+              Copy-Item -Path $file.FullName -Destination "./db-scripts/$($file.Name)" -Force
+            } else {
+              Copy-Item -Path $file.FullName -Destination "./table-scripts/$($file.Name)" -Force
+            }
+          }
+
+      # Deploy database creation scripts
+      - name: Execute DB Creation Scripts on DEV
+        shell: pwsh
+        env:
+          DB_SERVER: ${{ secrets.DEV_DB_SERVER }}
+          DB_USER: ${{ secrets.DEV_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
+        run: |
+          $dbScripts = Get-ChildItem -Path "./db-scripts" -Filter "*.sql" -File
+          
+          if ($dbScripts.Count -gt 0) {
+            foreach ($script in $dbScripts) {
+              Write-Host "Executing database creation script: $($script.FullName)"
+              sqlcmd -S "$env:DB_SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -i $script.FullName
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Error executing $($script.Name)" -ForegroundColor Red
+                exit 1
+              }
+            }
+          } else {
+            Write-Host "No database creation scripts found"
+          }
+
+      # Deploy table creation scripts
+      - name: Execute Table Creation Scripts on DEV
+        shell: pwsh
+        env:
+          DB_SERVER: ${{ secrets.DEV_DB_SERVER }}
+          DB_USER: ${{ secrets.DEV_DB_USER }}
+          DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
+        run: |
+          $tableScripts = Get-ChildItem -Path "./table-scripts" -Filter "*.sql" -File
+          
+          if ($tableScripts.Count -gt 0) {
+            foreach ($script in $tableScripts) {
+              Write-Host "Executing table creation script: $($script.FullName)"
+              sqlcmd -S "$env:DB_SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -i $script.FullName
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Error executing $($script.Name)" -ForegroundColor Red
+                exit 1
+              }
+            }
+          } else {
+            Write-Host "No table creation scripts found"
+          }
+
+      - name: Mark DEV Deployment as Successful
+        run: echo "DEV deployment completed successfully"
+
+  deploy-to-qa:
+    needs: deploy-to-dev
+    runs-on: self-hosted
+    environment: qa
+    
+    steps:
+      - name: Download SQL Migration Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ./sql-scripts
+
+      # Split SQL files into database creation and table creation scripts
+      - name: Prepare SQL Scripts
+        shell: pwsh
+        run: |
+          # Create directories for database and table scripts
+          New-Item -Path "./db-scripts" -ItemType Directory -Force
+          New-Item -Path "./table-scripts" -ItemType Directory -Force
+          
+          # Find all SQL files
+          $sqlFiles = Get-ChildItem -Path "./sql-scripts" -Filter "*.sql" -Recurse
+          
+          foreach ($file in $sqlFiles) {
+            $content = Get-Content -Path $file.FullName -Raw
+            
+            # If file contains CREATE DATABASE, copy to db-scripts
+            if ($content -match "CREATE DATABASE") {
+              Copy-Item -Path $file.FullName -Destination "./db-scripts/$($file.Name)" -Force
+            } else {
+              Copy-Item -Path $file.FullName -Destination "./table-scripts/$($file.Name)" -Force
+            }
+          }
+
+      # Deploy database creation scripts
+      - name: Execute DB Creation Scripts on QA
+        shell: pwsh
+        env:
+          DB_SERVER: ${{ secrets.QA_DB_SERVER }}
+          DB_USER: ${{ secrets.QA_DB_USER }}
+          DB_PASSWORD: ${{ secrets.QA_DB_PASSWORD }}
+        run: |
+          $dbScripts = Get-ChildItem -Path "./db-scripts" -Filter "*.sql" -File
+          
+          if ($dbScripts.Count -gt 0) {
+            foreach ($script in $dbScripts) {
+              Write-Host "Executing database creation script: $($script.FullName)"
+              sqlcmd -S "$env:DB_SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -i $script.FullName
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Error executing $($script.Name)" -ForegroundColor Red
+                exit 1
+              }
+            }
+          } else {
+            Write-Host "No database creation scripts found"
+          }
+
+      # Deploy table creation scripts
+      - name: Execute Table Creation Scripts on QA
+        shell: pwsh
+        env:
+          DB_SERVER: ${{ secrets.QA_DB_SERVER }}
+          DB_USER: ${{ secrets.QA_DB_USER }}
+          DB_PASSWORD: ${{ secrets.QA_DB_PASSWORD }}
+        run: |
+          $tableScripts = Get-ChildItem -Path "./table-scripts" -Filter "*.sql" -File
+          
+          if ($tableScripts.Count -gt 0) {
+            foreach ($script in $tableScripts) {
+              Write-Host "Executing table creation script: $($script.FullName)"
+              sqlcmd -S "$env:DB_SERVER" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -i $script.FullName
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Error executing $($script.Name)" -ForegroundColor Red
+                exit 1
+              }
+            }
+          } else {
+            Write-Host "No table creation scripts found"
+          }
+
+      - name: Mark QA Deployment as Successful
+        run: echo "QA deployment completed successfully"
