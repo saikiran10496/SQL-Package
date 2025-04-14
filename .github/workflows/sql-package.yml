@@ -10,6 +10,8 @@ on:
 jobs:
   copy-changed-files:
     runs-on: self-hosted
+    outputs:
+      changes_found: ${{ steps.copy-files.outputs.changes_found }}
      
     steps:
       - name: Checkout code
@@ -209,7 +211,7 @@ jobs:
   deploy-to-database:
     needs: copy-changed-files
     # Only run this job if there were changes found in the migrations folder
-    if: needs.copy-changed-files.outputs.copy-files.changes_found == 'true'
+    if: needs.copy-changed-files.outputs.changes_found == 'true'
     runs-on: self-hosted
     
     # Define environment based on branch
