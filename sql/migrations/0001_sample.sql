@@ -1,1 +1,1 @@
-select 'sample script'
+select 'sample script 3'
