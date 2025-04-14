@@ -228,10 +228,27 @@ jobs:
           path: ./sql-scripts
 
       - name: Deploy SQL Scripts to Local SQL Server
+        shell: pwsh
         run: |
-          for file in ./sql-scripts/*.sql; do
-            echo "Executing $file"
-            sqlcmd -S localhost\SQLEXPRESS01 -d master -i "$file"
-          done
+          # Find all SQL files in the downloaded artifacts
+          $sqlFiles = Get-ChildItem -Path "./sql-scripts" -Filter "*.sql" -Recurse
+          
+          if ($sqlFiles.Count -eq 0) {
+            Write-Host "No SQL files found in the artifacts" -ForegroundColor Yellow
+            exit 0
+          }
+          
+          Write-Host "Found $($sqlFiles.Count) SQL files to execute:"
+          foreach ($file in $sqlFiles) {
+            Write-Host "Executing $($file.FullName)"
+            sqlcmd -S "localhost\SQLEXPRESS01" -d master -i $file.FullName
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Successfully executed $($file.Name)" -ForegroundColor Green
+            } else {
+              Write-Host "Error executing $($file.Name)" -ForegroundColor Red
+              exit 1
+            }
+          }
       
       
