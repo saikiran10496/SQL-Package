@@ -18,6 +18,7 @@ jobs:
           fetch-depth: 0
       
       - name: Copy Changed Files from SQL migrations
+        id: copy-files
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -59,6 +60,11 @@ jobs:
                   Write-Host "==============================================" -ForegroundColor Yellow
                   Write-Host "NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
                   Write-Host "==============================================" -ForegroundColor Yellow
+                  # Set output variable to indicate no changes
+                  Write-Output "changes_found=false" >> $env:GITHUB_OUTPUT
+              } else {
+                  # Set output variable to indicate changes were found
+                  Write-Output "changes_found=true" >> $env:GITHUB_OUTPUT
               }
           }
           catch {
@@ -177,6 +183,7 @@ jobs:
           }
       
       - name: Upload Changed Files Artifact
+        if: steps.copy-files.outputs.changes_found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sql-migrations-changes-${{ github.sha }}
@@ -197,39 +204,3 @@ jobs:
           } else {
               Write-Output "## NO CHANGES IN migrations FOLDER" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
           }
-
-      - name: Download SQL Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: sql-migrations-changes-${{ github.sha }}
-          path: ${{ github.workspace }}/sql-artifact  
-
-      - name: List downloaded files
-        shell: pwsh
-        run: |
-          Write-Host "Listing SQL files under sql-artifact:"
-          Get-ChildItem -Recurse "${{ github.workspace }}/sql-artifact"
-          
-      - name: Run SQL Scripts on Azure SQL Database
-        shell: pwsh
-        run: |
-          $files = Get-ChildItem "${{ github.workspace }}/sql-artifact" -Recurse -Filter *.sql
-          
-          if ($files.Count -eq 0) {
-            Write-Host "No .sql files found in the artifact!"
-            exit 1
-          }
-
-          foreach ($file in $files) {
-            Write-Host "Running script: $($file.FullName)"
-
-            sqlcmd -S tcp:${{ secrets.DB_SERVER }}.database.windows.net,1433 `
-                   -U ${{ secrets.DB_USERNAME }} `
-                   -P ${{ secrets.DB_PASSWORD }} `
-                   -d ${{ secrets.DB_NAME }} `
-                   -i "$($file.FullName)"
-          }
-
-      - name: SQL Script Deployment Completed
-        run: echo "All SQL migration scripts have been executed successfully."
-
