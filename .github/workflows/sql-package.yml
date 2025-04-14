@@ -9,8 +9,8 @@ on:
 
 jobs:
   copy-changed-files:
-    runs-on: windows-latest
-    
+    runs-on: self-hosted
+     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -210,159 +210,26 @@ jobs:
     needs: copy-changed-files
     # Only run this job if there were changes found in the migrations folder
     if: needs.copy-changed-files.outputs.changes_found == 'true'
-    runs-on: windows-latest
+    runs-on: self-hosted
     
     # Define environment based on branch
-    environment:
-      ${{ github.ref == 'refs/heads/main' && 'production' || 
-          github.ref == 'refs/heads/develop' && 'development' || 
-          'test' }}
+    #environment:
+     # ${{ github.ref == 'refs/heads/main' && 'production' || 
+     #     github.ref == 'refs/heads/develop' && 'development' || 
+      #    'test' }}
     
     steps:
       - name: Download SQL Migration Artifacts
         uses: actions/download-artifact@v4
         with:
           name: sql-migrations-changes-${{ github.sha }}
-          path: ${{ github.workspace }}/sql-migrations
-      
-      - name: Set up SQL Server Tools
-        shell: pwsh
+          path: ./sql-scripts
+
+      - name: Deploy SQL Scripts to Local SQL Server
         run: |
-          # Check if SQL Server tools are installed
-          $sqlCmdPath = "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE"
-          
-          if (-not (Test-Path $sqlCmdPath)) {
-            Write-Host "SQL Server tools not found. Installing..."
-            
-            # Download and install SQL Server tools (ODBC Driver)
-            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2168524" -OutFile "C:\sqlncli.msi"
-            Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "C:\sqlncli.msi", "/qn", "IACCEPTSQLNCLILICENSETERMS=YES" -Wait
-            
-            # Verify installation
-            if (-not (Test-Path $sqlCmdPath)) {
-              Write-Host "Failed to install SQL Server tools" -ForegroundColor Red
-              exit 1
-            }
-          }
+          for file in ./sql-scripts/*.sql; do
+            echo "Executing $file"
+            sqlcmd -S localhost\SQLEXPRESS01 -d master -i "$file"
+          done
       
-      - name: Determine Database Connection Based on Environment
-        id: db-config
-        shell: pwsh
-        run: |
-          # Set different connection details based on the current environment
-          if ('${{ github.ref }}' -eq 'refs/heads/main') {
-            Write-Output "db_server=${{ secrets.PROD_DB_SERVER }}" >> $env:GITHUB_OUTPUT
-            Write-Output "db_name=${{ secrets.PROD_DB_NAME }}" >> $env:GITHUB_OUTPUT
-            Write-Output "env_name=Production" >> $env:GITHUB_OUTPUT
-          } elseif ('${{ github.ref }}' -eq 'refs/heads/develop') {
-            Write-Output "db_server=${{ secrets.DEV_DB_SERVER }}" >> $env:GITHUB_OUTPUT
-            Write-Output "db_name=${{ secrets.DEV_DB_NAME }}" >> $env:GITHUB_OUTPUT
-            Write-Output "env_name=Development" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Output "db_server=${{ secrets.TEST_DB_SERVER }}" >> $env:GITHUB_OUTPUT
-            Write-Output "db_name=${{ secrets.TEST_DB_NAME }}" >> $env:GITHUB_OUTPUT
-            Write-Output "env_name=Test" >> $env:GITHUB_OUTPUT
-          }
       
-      - name: Execute SQL Migration Scripts
-        shell: pwsh
-        env:
-          DB_SERVER: ${{ steps.db-config.outputs.db_server }}
-          DB_NAME: ${{ steps.db-config.outputs.db_name }}
-          DB_USER: ${{ secrets.DB_USERNAME }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          ENV_NAME: ${{ steps.db-config.outputs.env_name }}
-        run: |
-          Write-Host "Starting SQL migration deployment to $env:ENV_NAME environment..."
-          Write-Host "Database Server: $env:DB_SERVER"
-          Write-Host "Database Name: $env:DB_NAME"
-          
-          # Get all SQL files from the migrations directory
-          $sqlFiles = Get-ChildItem -Path "${{ github.workspace }}/sql-migrations/sql/migrations" -Filter "*.sql" -Recurse | Sort-Object Name
-          
-          if ($sqlFiles.Count -eq 0) {
-            Write-Host "No SQL files found in the migrations directory" -ForegroundColor Yellow
-            exit 0
-          }
-          
-          Write-Host "Found $($sqlFiles.Count) SQL files to execute:"
-          foreach ($file in $sqlFiles) {
-            Write-Host " - $($file.Name)"
-          }
-          
-          # Create a log directory
-          $logDir = "${{ github.workspace }}/logs"
-          New-Item -Path $logDir -ItemType Directory -Force | Out-Null
-          
-          $successCount = 0
-          $errorCount = 0
-          $errorFiles = @()
-          
-          foreach ($file in $sqlFiles) {
-            $logFile = Join-Path -Path $logDir -ChildPath "$($file.BaseName)_log.txt"
-            Write-Host "Executing $($file.FullName)..."
-            try {
-              # Execute SQL file using SQLCMD
-              $output = sqlcmd -S "$env:DB_SERVER" -d "$env:DB_NAME" -U "$env:DB_USER" -P "$env:DB_PASSWORD" -i "$($file.FullName)" -o "$logFile" -b
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully executed $($file.Name)" -ForegroundColor Green
-                $successCount++
-              } else {
-                Write-Host "Error executing $($file.Name) - Check log file: $logFile" -ForegroundColor Red
-                $errorCount++
-                $errorFiles += $file.Name
-              }
-            } catch {
-              Write-Host "Exception while executing $($file.Name): $_" -ForegroundColor Red
-              $errorCount++
-              $errorFiles += $file.Name
-            }
-          }
-          
-          # Create deployment summary
-          $summaryFile = "${{ github.workspace }}/deployment-summary.md"
-          "# SQL Migration Deployment Summary" | Out-File -FilePath $summaryFile
-          "" | Out-File -FilePath $summaryFile -Append
-          "## Environment: $env:ENV_NAME" | Out-File -FilePath $summaryFile -Append
-          "- Database Server: $env:DB_SERVER" | Out-File -FilePath $summaryFile -Append
-          "- Database Name: $env:DB_NAME" | Out-File -FilePath $summaryFile -Append
-          "" | Out-File -FilePath $summaryFile -Append
-          "## Execution Results" | Out-File -FilePath $summaryFile -Append
-          "- Total Scripts: $($sqlFiles.Count)" | Out-File -FilePath $summaryFile -Append
-          "- Successfully Executed: $successCount" | Out-File -FilePath $summaryFile -Append
-          "- Failed: $errorCount" | Out-File -FilePath $summaryFile -Append
-          
-          if ($errorCount -gt 0) {
-            "" | Out-File -FilePath $summaryFile -Append
-            "## Failed Scripts" | Out-File -FilePath $summaryFile -Append
-            foreach ($errorFile in $errorFiles) {
-              "- $errorFile" | Out-File -FilePath $summaryFile -Append
-            }
-            
-            Write-Host "Deployment completed with errors. $errorCount out of $($sqlFiles.Count) scripts failed." -ForegroundColor Red
-            exit 1
-          } else {
-            Write-Host "Deployment completed successfully. All $($sqlFiles.Count) scripts executed." -ForegroundColor Green
-          }
-      
-      - name: Upload Deployment Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: sql-deployment-logs-${{ github.sha }}
-          path: ${{ github.workspace }}/logs/
-          retention-days: 14
-      
-      - name: Add Deployment Summary to Job Output
-        shell: pwsh
-        run: |
-          $summaryFile = "${{ github.workspace }}/deployment-summary.md"
-          
-          if (Test-Path -Path $summaryFile -PathType Leaf) {
-              $content = Get-Content -Path $summaryFile -Raw
-              
-              # Output to job summary
-              $content | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
-          } else {
-              Write-Output "## No Deployment Summary Available" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
-          }
