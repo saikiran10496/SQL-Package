@@ -1,1 +1,1 @@
-select 'sample script 3'
+CREATE DATABASE TestDB;
