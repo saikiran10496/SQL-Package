@@ -1,4 +1,4 @@
-name: SQL-PACKAGE
+name: SQL-PACKAGE-DEV-QA
 
 on:
   push:
