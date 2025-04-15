@@ -26,8 +26,163 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_ID: ${{ github.sha }}
         run: |
-          # Your existing script for identifying and copying changed files
-          # ...
+          $sourceDir = "${{ github.workspace }}"
+          $destDir = "${{ github.workspace }}/changed-files"
+          $targetSubDirectory = "sql/migrations" # Focus only on this directory
+          
+          # Create artifacts directory
+          New-Item -Path $destDir -ItemType Directory -Force
+          
+          # Get the commit SHA
+          $commitSha = "$env:COMMIT_ID"
+          Write-Host "Analyzing commit: $commitSha"
+          
+          # Use GitHub API to get commit details
+          $headers = @{
+              Authorization = "Bearer $env:GITHUB_TOKEN"
+              Accept = "application/vnd.github.v3+json"
+          }
+          
+          $apiUrl = "https://api.github.com/repos/${{ github.repository }}/commits/$commitSha"
+          Write-Host "Fetching commit details from: $apiUrl"
+          
+          try {
+              $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -Method Get
+              $allChangedFiles = $response.files | ForEach-Object { $_.filename }
+              
+              if ($null -eq $allChangedFiles) {
+                  Write-Host "No changed files found in the API response" -ForegroundColor Yellow
+                  $allChangedFiles = @()
+              }
+              
+              # Filter files to only include those in the target directory
+              $changedFiles = $allChangedFiles | Where-Object { $_ -like "$targetSubDirectory/*" }
+              
+              if ($changedFiles.Count -eq 0) {
+                  Write-Host "==============================================" -ForegroundColor Yellow
+                  Write-Host "NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+                  Write-Host "==============================================" -ForegroundColor Yellow
+                  # Set output variable to indicate no changes
+                  Write-Output "changes_found=false" >> $env:GITHUB_OUTPUT
+              } else {
+                  # Set output variable to indicate changes were found
+                  Write-Output "changes_found=true" >> $env:GITHUB_OUTPUT
+              }
+          }
+          catch {
+              Write-Host "Error fetching commit details from GitHub API: $_" -ForegroundColor Red
+              Write-Host "Response: $($_.ErrorDetails.Message)" -ForegroundColor Red
+              exit 1
+          }
+          
+          # Echo list of all changed files vs filtered files
+          Write-Host "======= ALL CHANGED FILES ======="
+          foreach ($file in $allChangedFiles) {
+              Write-Host $file
+          }
+          Write-Host "Total files changed in repo: $($allChangedFiles.Count)"
+          Write-Host "=================================="
+          
+          Write-Host "======= FILTERED CHANGED FILES ($targetSubDirectory) ======="
+          if ($changedFiles.Count -eq 0) {
+              Write-Host "NO CHANGES IN MIGRATION FOLDER" -ForegroundColor Yellow
+          } else {
+              foreach ($file in $changedFiles) {
+                  Write-Host $file
+              }
+          }
+          # Fix for the colon issue in string interpolation
+          Write-Host "Total files changed in $targetSubDirectory - $($changedFiles.Count)"
+          Write-Host "=================================="
+          
+          $fileCount = 0
+          $copiedFiles = @()
+          
+          foreach ($file in $changedFiles) {
+              $fileCount++
+              Write-Host ".....Processing Changed File: $file"
+              
+              # Convert forward slashes to backslashes for Windows paths
+              $filePath = $file.Replace("/", "\")
+              $path = Split-Path -Path $filePath
+              
+              # Create directory structure
+              if ($path) {
+                  $targetDir = "$destDir\$path"
+                  Write-Host "Creating directory: $targetDir"
+                  if (!(Test-Path -Path $targetDir)) {
+                      New-Item -Path $targetDir -ItemType Directory -Force
+                  }
+              } else {
+                  $targetDir = $destDir
+              }
+              
+              # Copy the file
+              $sourceFile = "$sourceDir\$file"
+              $destinationFile = "$targetDir\$(Split-Path -Path $file -Leaf)"
+              
+              if (Test-Path -Path $sourceFile -PathType Leaf) {
+                  Write-Host "Copying File: $sourceFile to $destinationFile"
+                  try {
+                      Copy-Item -Path $sourceFile -Destination $destinationFile -Force
+                      if (Test-Path -Path $destinationFile -PathType Leaf) {
+                          Write-Host "Successfully copied to $destinationFile" -ForegroundColor Green
+                          $copiedFiles += $destinationFile
+                      } else {
+                          Write-Host "Failed to copy to $destinationFile - file doesn't exist after copy" -ForegroundColor Red
+                      }
+                  } catch {
+                      Write-Host "Error copying file: $_" -ForegroundColor Red
+                  }
+              } else {
+                  Write-Host "Source file not found: $sourceFile" -ForegroundColor Yellow
+              }
+          }
+          
+          # List all files in the destination directory
+          Write-Host "======= FILES IN DESTINATION DIRECTORY ======="
+          if (Test-Path -Path $destDir) {
+              $allDestFiles = Get-ChildItem -Path $destDir -Recurse -File | Select-Object -ExpandProperty FullName
+              if ($allDestFiles.Count -gt 0) {
+                  foreach ($file in $allDestFiles) {
+                      Write-Host $file
+                  }
+                  Write-Host "Total files found in destination: $($allDestFiles.Count)"
+              } else {
+                  Write-Host "NO FILES COPIED - NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+              }
+          } else {
+              Write-Host "Destination directory does not exist" -ForegroundColor Red
+          }
+          Write-Host "=============================================="
+          
+          # Create a summary file
+          $summaryFile = "$destDir\change-summary.md"
+          "# Changes in SQL migrations Directory - Commit $commitSha" | Out-File -FilePath $summaryFile
+          "" | Out-File -FilePath $summaryFile -Append
+          
+          if ($fileCount -eq 0) {
+              "## NO CHANGES IN migrations FOLDER" | Out-File -FilePath $summaryFile -Append
+          } else {
+              "## Total files changed in SQL migrations: $fileCount" | Out-File -FilePath $summaryFile -Append
+              "" | Out-File -FilePath $summaryFile -Append
+              "## Changed Files:" | Out-File -FilePath $summaryFile -Append
+              foreach ($file in $changedFiles) {
+                  "- $file" | Out-File -FilePath $summaryFile -Append
+              }
+              
+              "" | Out-File -FilePath $summaryFile -Append
+              "## Copied Files:" | Out-File -FilePath $summaryFile -Append
+              foreach ($file in $copiedFiles) {
+                  "- $file" | Out-File -FilePath $summaryFile -Append
+              }
+          }
+          
+          if ($fileCount -eq 0) {
+              Write-Host "NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+          } else {
+              Write-Host "Total files copied: $($copiedFiles.Count)" -ForegroundColor Green
+          }
           
       - name: Upload Changed Files Artifact
         if: steps.copy-files.outputs.changes_found == 'true'
