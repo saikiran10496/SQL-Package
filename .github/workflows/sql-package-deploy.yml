@@ -193,6 +193,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Add Job Summary
+        shell: pwsh
+        run: |
+          $summaryFile = "${{ github.workspace }}/changed-files/change-summary.md"
+          
+          if (Test-Path -Path $summaryFile -PathType Leaf) {
+              $content = Get-Content -Path $summaryFile -Raw
+              
+              # Output to job summary
+              $content | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
+          } else {
+              Write-Output "## NO CHANGES IN migrations FOLDER" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+
   deploy-to-dev:
     needs: copy-changed-files
     if: needs.copy-changed-files.outputs.changes_found == 'true'
