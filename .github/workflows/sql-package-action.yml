@@ -1,0 +1,364 @@
+name: SQL-PACKAGE
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - satish/sqlworkflowsetup
+  workflow_dispatch:
+
+jobs:
+  copy-changed-files:
+    runs-on: self-hosted
+    outputs:
+      changes_found: ${{ steps.copy-files.outputs.changes_found }}
+     
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Copy Changed Files from SQL migrations
+        id: copy-files
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_ID: ${{ github.sha }}
+        run: |
+          $sourceDir = "${{ github.workspace }}"
+          $destDir = "${{ github.workspace }}/changed-files"
+          $targetSubDirectory = "sql/migrations" # Focus only on this directory
+          
+          # Create artifacts directory
+          New-Item -Path $destDir -ItemType Directory -Force
+          
+          # Get the commit SHA
+          $commitSha = "$env:COMMIT_ID"
+          Write-Host "Analyzing commit: $commitSha"
+          
+          # Use GitHub API to get commit details
+          $headers = @{
+              Authorization = "Bearer $env:GITHUB_TOKEN"
+              Accept = "application/vnd.github.v3+json"
+          }
+          
+          $apiUrl = "https://api.github.com/repos/${{ github.repository }}/commits/$commitSha"
+          Write-Host "Fetching commit details from: $apiUrl"
+          
+          try {
+              $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -Method Get
+              $allChangedFiles = $response.files | ForEach-Object { $_.filename }
+              
+              if ($null -eq $allChangedFiles) {
+                  Write-Host "No changed files found in the API response" -ForegroundColor Yellow
+                  $allChangedFiles = @()
+              }
+              
+              # Filter files to only include those in the target directory
+              $changedFiles = $allChangedFiles | Where-Object { $_ -like "$targetSubDirectory/*" }
+              
+              if ($changedFiles.Count -eq 0) {
+                  Write-Host "==============================================" -ForegroundColor Yellow
+                  Write-Host "NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+                  Write-Host "==============================================" -ForegroundColor Yellow
+                  # Set output variable to indicate no changes
+                  Write-Output "changes_found=false" >> $env:GITHUB_OUTPUT
+              } else {
+                  # Set output variable to indicate changes were found
+                  Write-Output "changes_found=true" >> $env:GITHUB_OUTPUT
+              }
+          }
+          catch {
+              Write-Host "Error fetching commit details from GitHub API: $_" -ForegroundColor Red
+              Write-Host "Response: $($_.ErrorDetails.Message)" -ForegroundColor Red
+              exit 1
+          }
+          
+          # Echo list of all changed files vs filtered files
+          Write-Host "======= ALL CHANGED FILES ======="
+          foreach ($file in $allChangedFiles) {
+              Write-Host $file
+          }
+          Write-Host "Total files changed in repo: $($allChangedFiles.Count)"
+          Write-Host "=================================="
+          
+          Write-Host "======= FILTERED CHANGED FILES ($targetSubDirectory) ======="
+          if ($changedFiles.Count -eq 0) {
+              Write-Host "NO CHANGES IN MIGRATION FOLDER" -ForegroundColor Yellow
+          } else {
+              foreach ($file in $changedFiles) {
+                  Write-Host $file
+              }
+          }
+          # Fix for the colon issue in string interpolation
+          Write-Host "Total files changed in $targetSubDirectory - $($changedFiles.Count)"
+          Write-Host "=================================="
+          
+          $fileCount = 0
+          $copiedFiles = @()
+          
+          foreach ($file in $changedFiles) {
+              $fileCount++
+              Write-Host ".....Processing Changed File: $file"
+              
+              # Convert forward slashes to backslashes for Windows paths
+              $filePath = $file.Replace("/", "\")
+              $path = Split-Path -Path $filePath
+              
+              # Create directory structure
+              if ($path) {
+                  $targetDir = "$destDir\$path"
+                  Write-Host "Creating directory: $targetDir"
+                  if (!(Test-Path -Path $targetDir)) {
+                      New-Item -Path $targetDir -ItemType Directory -Force
+                  }
+              } else {
+                  $targetDir = $destDir
+              }
+              
+              # Copy the file
+              $sourceFile = "$sourceDir\$file"
+              $destinationFile = "$targetDir\$(Split-Path -Path $file -Leaf)"
+              
+              if (Test-Path -Path $sourceFile -PathType Leaf) {
+                  Write-Host "Copying File: $sourceFile to $destinationFile"
+                  try {
+                      Copy-Item -Path $sourceFile -Destination $destinationFile -Force
+                      if (Test-Path -Path $destinationFile -PathType Leaf) {
+                          Write-Host "Successfully copied to $destinationFile" -ForegroundColor Green
+                          $copiedFiles += $destinationFile
+                      } else {
+                          Write-Host "Failed to copy to $destinationFile - file doesn't exist after copy" -ForegroundColor Red
+                      }
+                  } catch {
+                      Write-Host "Error copying file: $_" -ForegroundColor Red
+                  }
+              } else {
+                  Write-Host "Source file not found: $sourceFile" -ForegroundColor Yellow
+              }
+          }
+          
+          # List all files in the destination directory
+          Write-Host "======= FILES IN DESTINATION DIRECTORY ======="
+          if (Test-Path -Path $destDir) {
+              $allDestFiles = Get-ChildItem -Path $destDir -Recurse -File | Select-Object -ExpandProperty FullName
+              if ($allDestFiles.Count -gt 0) {
+                  foreach ($file in $allDestFiles) {
+                      Write-Host $file
+                  }
+                  Write-Host "Total files found in destination: $($allDestFiles.Count)"
+              } else {
+                  Write-Host "NO FILES COPIED - NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+              }
+          } else {
+              Write-Host "Destination directory does not exist" -ForegroundColor Red
+          }
+          Write-Host "=============================================="
+          
+          # Create a summary file
+          $summaryFile = "$destDir\change-summary.md"
+          "# Changes in SQL migrations Directory - Commit $commitSha" | Out-File -FilePath $summaryFile
+          "" | Out-File -FilePath $summaryFile -Append
+          
+          if ($fileCount -eq 0) {
+              "## NO CHANGES IN migrations FOLDER" | Out-File -FilePath $summaryFile -Append
+          } else {
+              "## Total files changed in SQL migrations: $fileCount" | Out-File -FilePath $summaryFile -Append
+              "" | Out-File -FilePath $summaryFile -Append
+              "## Changed Files:" | Out-File -FilePath $summaryFile -Append
+              foreach ($file in $changedFiles) {
+                  "- $file" | Out-File -FilePath $summaryFile -Append
+              }
+              
+              "" | Out-File -FilePath $summaryFile -Append
+              "## Copied Files:" | Out-File -FilePath $summaryFile -Append
+              foreach ($file in $copiedFiles) {
+                  "- $file" | Out-File -FilePath $summaryFile -Append
+              }
+          }
+          
+          if ($fileCount -eq 0) {
+              Write-Host "NO CHANGES IN migrations FOLDER" -ForegroundColor Yellow
+          } else {
+              Write-Host "Total files copied: $($copiedFiles.Count)" -ForegroundColor Green
+          }
+      
+      - name: Upload Changed Files Artifact
+        if: steps.copy-files.outputs.changes_found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ${{ github.workspace }}/changed-files/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Add Job Summary
+        shell: pwsh
+        run: |
+          $summaryFile = "${{ github.workspace }}/changed-files/change-summary.md"
+          
+          if (Test-Path -Path $summaryFile -PathType Leaf) {
+              $content = Get-Content -Path $summaryFile -Raw
+              
+              # Output to job summary
+              $content | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
+          } else {
+              Write-Output "## NO CHANGES IN migrations FOLDER" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
+          }
+
+  # Deploy to DEV environment
+  deploy-to-dev:
+    needs: copy-changed-files
+    if: needs.copy-changed-files.outputs.changes_found == 'true'
+    runs-on: self-hosted
+    environment: development
+    
+    steps:
+      - name: Download SQL Migration Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ./sql-scripts
+
+      - name: Prepare SQL Scripts
+        id: prepare-scripts
+        shell: pwsh
+        run: |
+          # Create directories for different script types
+          New-Item -Path "./db-scripts" -ItemType Directory -Force
+          New-Item -Path "./table-scripts" -ItemType Directory -Force
+          
+          # Find all SQL files
+          $sqlFiles = Get-ChildItem -Path "./sql-scripts" -Filter "*.sql" -Recurse
+          
+          if ($sqlFiles.Count -eq 0) {
+            Write-Host "No SQL files found in the artifacts" -ForegroundColor Yellow
+            echo "script_count=0" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          
+          # Sort files by execution order if they follow naming convention like 001_, 002_, etc.
+          $sqlFiles = $sqlFiles | Sort-Object Name
+          
+          # Split into DB creation scripts and table scripts
+          foreach ($file in $sqlFiles) {
+            $content = Get-Content -Path $file.FullName -Raw
+            
+            # If file contains CREATE DATABASE, copy to db-scripts
+            if ($content -match "CREATE DATABASE") {
+              Copy-Item -Path $file.FullName -Destination "./db-scripts/$($file.Name)" -Force
+            } else {
+              Copy-Item -Path $file.FullName -Destination "./table-scripts/$($file.Name)" -Force
+            }
+          }
+          
+          $dbScriptCount = (Get-ChildItem -Path "./db-scripts" -Filter "*.sql" -File).Count
+          $tableScriptCount = (Get-ChildItem -Path "./table-scripts" -Filter "*.sql" -File).Count
+          
+          Write-Host "Found $dbScriptCount database scripts and $tableScriptCount table scripts"
+          echo "db_script_count=$dbScriptCount" >> $env:GITHUB_OUTPUT
+          echo "table_script_count=$tableScriptCount" >> $env:GITHUB_OUTPUT
+          echo "script_count=$($sqlFiles.Count)" >> $env:GITHUB_OUTPUT
+
+      # Deploy Database Creation Scripts to DEV
+      - name: Deploy Database Creation Scripts to DEV
+        if: steps.prepare-scripts.outputs.db_script_count > 0
+        uses: azure/sql-action@v2
+        with:
+          connection-string: ${{ secrets.DEV_SQL_CONNECTION_STRING || 'Server=localhost\SQLEXPRESS01;Trusted_Connection=True;' }}
+          path: './db-scripts/*.sql'
+          action: 'publish'
+
+      # Deploy Table Creation Scripts to DEV
+      - name: Deploy Table Creation Scripts to DEV
+        if: steps.prepare-scripts.outputs.table_script_count > 0
+        uses: azure/sql-action@v2
+        with:
+          connection-string: ${{ secrets.DEV_SQL_CONNECTION_STRING || 'Server=localhost\SQLEXPRESS01;Trusted_Connection=True;' }}
+          path: './table-scripts/*.sql'
+          action: 'publish'
+
+      - name: Create DEV Deployment Summary
+        run: |
+          echo "# 🚀 Database Deployment to DEV Completed" >> $GITHUB_STEP_SUMMARY
+          echo "Successfully deployed SQL scripts to the DEV environment." >> $GITHUB_STEP_SUMMARY
+          echo "Total scripts executed: ${{ steps.prepare-scripts.outputs.script_count }}" >> $GITHUB_STEP_SUMMARY
+
+  # Deploy to QA environment (requires approval via environment protection rules)
+  deploy-to-qa:
+    needs: deploy-to-dev
+    runs-on: self-hosted
+    environment: qa  # This will enforce approval if configured in GitHub repo settings
+    
+    steps:
+      - name: Download SQL Migration Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sql-migrations-changes-${{ github.sha }}
+          path: ./sql-scripts
+
+      - name: Prepare SQL Scripts
+        id: prepare-scripts
+        shell: pwsh
+        run: |
+          # Create directories for different script types
+          New-Item -Path "./db-scripts" -ItemType Directory -Force
+          New-Item -Path "./table-scripts" -ItemType Directory -Force
+          
+          # Find all SQL files
+          $sqlFiles = Get-ChildItem -Path "./sql-scripts" -Filter "*.sql" -Recurse
+          
+          if ($sqlFiles.Count -eq 0) {
+            Write-Host "No SQL files found in the artifacts" -ForegroundColor Yellow
+            echo "script_count=0" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          
+          # Sort files by execution order if they follow naming convention like 001_, 002_, etc.
+          $sqlFiles = $sqlFiles | Sort-Object Name
+          
+          # Split into DB creation scripts and table scripts
+          foreach ($file in $sqlFiles) {
+            $content = Get-Content -Path $file.FullName -Raw
+            
+            # If file contains CREATE DATABASE, copy to db-scripts
+            if ($content -match "CREATE DATABASE") {
+              Copy-Item -Path $file.FullName -Destination "./db-scripts/$($file.Name)" -Force
+            } else {
+              Copy-Item -Path $file.FullName -Destination "./table-scripts/$($file.Name)" -Force
+            }
+          }
+          
+          $dbScriptCount = (Get-ChildItem -Path "./db-scripts" -Filter "*.sql" -File).Count
+          $tableScriptCount = (Get-ChildItem -Path "./table-scripts" -Filter "*.sql" -File).Count
+          
+          Write-Host "Found $dbScriptCount database scripts and $tableScriptCount table scripts"
+          echo "db_script_count=$dbScriptCount" >> $env:GITHUB_OUTPUT
+          echo "table_script_count=$tableScriptCount" >> $env:GITHUB_OUTPUT
+          echo "script_count=$($sqlFiles.Count)" >> $env:GITHUB_OUTPUT
+
+      # Deploy Database Creation Scripts to QA
+      - name: Deploy Database Creation Scripts to QA
+        if: steps.prepare-scripts.outputs.db_script_count > 0
+        uses: azure/sql-action@v2
+        with:
+          connection-string: ${{ secrets.QA_SQL_CONNECTION_STRING }}
+          path: './db-scripts/*.sql'
+          action: 'publish'
+
+      # Deploy Table Creation Scripts to QA
+      - name: Deploy Table Creation Scripts to QA
+        if: steps.prepare-scripts.outputs.table_script_count > 0
+        uses: azure/sql-action@v2
+        with:
+          connection-string: ${{ secrets.QA_SQL_CONNECTION_STRING }}
+          path: './table-scripts/*.sql'
+          action: 'publish'
+
+      - name: Create QA Deployment Summary
+        run: |
+          echo "# 🚀 Database Deployment to QA Completed" >> $GITHUB_STEP_SUMMARY
+          echo "Successfully deployed SQL scripts to the QA environment." >> $GITHUB_STEP_SUMMARY
+          echo "Total scripts executed: ${{ steps.prepare-scripts.outputs.script_count }}" >> $GITHUB_STEP_SUMMARY
